@@ -1,0 +1,38 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: krone-groups-server:local
+    restart: unless-stopped
+    volumes:
+      - server_data:/data
+    environment:
+      KRONE_BIND: "0.0.0.0:8080"
+      KRONE_DATA_DIR: "/data"
+      KRONE_SERVER_SEED: "${KRONE_SERVER_SEED:-}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    expose:
+      - "8080"
+    # No ports published directly — Caddy terminates TLS and reverse-proxies.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: "${DOMAIN}"
+      TLS_EMAIL: "${TLS_EMAIL}"
+
+volumes:
+  server_data:
+  caddy_data:
+  caddy_config:

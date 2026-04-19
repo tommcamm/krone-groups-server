@@ -1,0 +1,22 @@
+{
+	email {$TLS_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Forward real client IP so tower_governor sees the actual origin.
+	header_up X-Forwarded-For {remote_host}
+	header_up X-Real-IP {remote_host}
+
+	reverse_proxy server:8080 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	log {
+		output stdout
+		format console
+		# Suppress access logs by default; request-level telemetry lives in the app.
+		level WARN
+	}
+}

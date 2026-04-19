@@ -1,9 +1,10 @@
-/target
-/data
-/deploy/.env
+target/
+data/
+.git/
+.idea/
+deploy/.env
 *.sqlite
 *.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal
-/.idea
-.DS_Store
+tests/

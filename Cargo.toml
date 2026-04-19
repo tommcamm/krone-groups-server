@@ -2,5 +2,43 @@
 name = "krone-groups-server"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Zero-metadata, E2E-encrypted message relay for Krone Groups."
+repository = "https://github.com/tommcamm/krone-groups-server"
+
+[lints.rust]
+unsafe_code = "forbid"
 
 [dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs", "io-util"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit", "timeout", "request-id"] }
+tower_governor = "0.8"
+
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+
+ed25519-dalek = { version = "2.2", features = ["zeroize"] }
+getrandom = "0.2"
+sha2 = "0.10"
+subtle = "2.6"
+bip39 = "2.2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ulid = { version = "1.2", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+thiserror = "2"
+anyhow = "1"
+hex = "0.4"
+base64 = "0.22"
+
+[dev-dependencies]
+jsonschema = "0.30"
+tempfile = "3"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
