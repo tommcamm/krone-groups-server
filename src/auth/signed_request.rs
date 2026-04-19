@@ -61,7 +61,7 @@ where
         let path_with_query = path_and_query(&parts.uri);
         let method = parts.method.clone();
 
-        let max = max_body_bytes(state);
+        let max = max_body_bytes(state, &method, &path_with_query);
         let body_bytes = to_bytes(body, max)
             .await
             .map_err(|_| ApiError::PayloadTooLarge)?;
@@ -103,8 +103,9 @@ impl FromRequest<AppState> for RawSignedRequest {
 
         let parsed = parse_signature_headers(&parts.headers, state)?;
         let path_with_query = path_and_query(&parts.uri);
+        let method = parts.method.clone();
 
-        let max = max_body_bytes(state);
+        let max = max_body_bytes(state, &method, &path_with_query);
         let body_bytes = to_bytes(body, max)
             .await
             .map_err(|_| ApiError::PayloadTooLarge)?;
@@ -114,7 +115,7 @@ impl FromRequest<AppState> for RawSignedRequest {
             timestamp: parsed.timestamp,
             body_bytes,
             signature: parsed.signature,
-            method: parts.method,
+            method,
             path_with_query,
         })
     }
@@ -191,10 +192,25 @@ fn path_and_query(uri: &axum::http::Uri) -> String {
         .unwrap_or_else(|| uri.path().to_string())
 }
 
-fn max_body_bytes(state: &AppState) -> usize {
-    // Envelope bodies are the largest; allow a small headroom factor for batched submits.
-    let envelope = state.cfg.policy.max_envelope_bytes as usize;
-    envelope.saturating_mul(300).max(64 * 1024)
+fn max_body_bytes(state: &AppState, method: &Method, path_with_query: &str) -> usize {
+    // Only `POST /envelopes` carries ciphertext; cap everything else tightly so a single
+    // misbehaving client can't burn memory on endpoints that only handle small JSON.
+    let path = path_with_query.split('?').next().unwrap_or(path_with_query);
+    let is_submit = method == Method::POST && path == "/envelopes";
+
+    if is_submit {
+        // Worst-case legitimate batch: MAX_BATCH envelopes × base64(ciphertext_max) + per-envelope
+        // fixed fields (ULID, hex IDs, tags, nonce, sig, keys) + outer JSON framing. Base64 is
+        // 4/3× decoded; use ×2 + 512 B per envelope for padding and safety.
+        let envelope = state.cfg.policy.max_envelope_bytes as usize;
+        let per_envelope_wire = envelope.saturating_mul(2).saturating_add(512);
+        per_envelope_wire
+            .saturating_mul(crate::config::MAX_ENVELOPES_PER_BATCH)
+            .saturating_add(128 * 1024)
+    } else {
+        // Register/ack/delete bodies are kilobytes at most.
+        128 * 1024
+    }
 }
 
 fn now_utc() -> OffsetDateTime {

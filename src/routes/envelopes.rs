@@ -7,6 +7,7 @@ use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
 
 use crate::auth::{RawSignedRequest, SignedRequest};
+use crate::config::MAX_ENVELOPES_PER_BATCH;
 use crate::db::queries::{self, InsertEnvelope};
 use crate::error::ApiError;
 use crate::protocol::envelope::{
@@ -31,8 +32,10 @@ async fn submit(
     if req.envelopes.is_empty() {
         return Err(ApiError::BadRequest("empty envelope batch".into()));
     }
-    if req.envelopes.len() > 256 {
-        return Err(ApiError::BadRequest("batch too large (>256)".into()));
+    if req.envelopes.len() > MAX_ENVELOPES_PER_BATCH {
+        return Err(ApiError::BadRequest(format!(
+            "batch too large (>{MAX_ENVELOPES_PER_BATCH})"
+        )));
     }
 
     let policy = &state.cfg.policy;
@@ -40,22 +43,13 @@ async fn submit(
     let now = OffsetDateTime::now_utc();
     let expires = now + ttl;
 
-    // Per-device submission rate limit (§9.4): reject early if the sender has exceeded
-    // the configured envelopes-per-hour budget.
-    let sent_last_hour = queries::count_sent_in_window(&state.db, &sender, now, 3600).await?;
-    if sent_last_hour as u32 + req.envelopes.len() as u32 > policy.max_envelopes_per_device_per_hour
-    {
-        return Err(ApiError::RateLimited);
-    }
-
-    let mut accepted = Vec::with_capacity(req.envelopes.len());
-
+    // Pre-validate the in-memory shape of every envelope BEFORE opening the DB transaction,
+    // so we don't hold a write lock during arithmetic / slice checks.
     for env in &req.envelopes {
-        // Size check on ciphertext; nonce/sig/tag are fixed-size.
         if env.ciphertext.len() as u64 > policy.max_envelope_bytes {
             return Err(ApiError::PayloadTooLarge);
         }
-        // Sender cannot address themselves (pointless round-trip, and prevents reflection attacks).
+        // Sender cannot address themselves (pointless round-trip, prevents reflection).
         if env.recipient_device_id.as_bytes() == sender.as_bytes() {
             return Err(ApiError::BadRequest(
                 "recipient_device_id must differ from sender".into(),
@@ -67,15 +61,29 @@ async fn submit(
                 "content_signature must be 64 bytes (Ed25519)".into(),
             ));
         }
+    }
 
-        // Enforce per-recipient inbox cap.
-        let pending = queries::count_pending(&state.db, &env.recipient_device_id).await?;
+    // All caps + inserts in one transaction so concurrent submits from the same sender
+    // can't race past the per-hour / per-inbox budgets.
+    let mut tx = state.db.begin().await?;
+
+    let sent_last_hour = queries::count_sent_in_window_with(&mut tx, &sender, now, 3600).await?;
+    if sent_last_hour as u32 + req.envelopes.len() as u32 > policy.max_envelopes_per_device_per_hour
+    {
+        return Err(ApiError::RateLimited);
+    }
+
+    let mut accepted = Vec::with_capacity(req.envelopes.len());
+    for env in &req.envelopes {
+        let pending = queries::count_pending_with(&mut tx, &env.recipient_device_id).await?;
         if pending as u32 >= policy.max_inbox_per_device {
             return Err(ApiError::RateLimited);
         }
 
-        let inserted = queries::insert_envelope(
-            &state.db,
+        // Idempotent on envelope_id: a replay with the same id is reported as accepted
+        // but not re-inserted.
+        let _inserted = queries::insert_envelope_with(
+            &mut tx,
             InsertEnvelope {
                 envelope_id: &env.envelope_id,
                 sender_id: &sender,
@@ -92,11 +100,10 @@ async fn submit(
         )
         .await?;
 
-        // Idempotent on envelope_id: a replay with the same id is reported as accepted but not re-inserted.
-        let _ = inserted;
         accepted.push(env.envelope_id);
     }
 
+    tx.commit().await?;
     Ok(Json(EnvelopeSubmitResponse { accepted }))
 }
 

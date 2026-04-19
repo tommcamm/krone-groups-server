@@ -195,6 +195,73 @@ async fn signed_request_rejects_tampered_signature() {
 }
 
 #[tokio::test]
+async fn delete_self_reaps_orphan_envelopes() {
+    // When the only recipient of an envelope deregisters, the envelope must be deleted
+    // along with its recipient row — otherwise it lingers in `envelopes` until TTL.
+    let harness = common::build_harness().await;
+    let alice = ClientIdentity::from_seed([0xC0; 32]);
+    let bob = ClientIdentity::from_seed([0xC1; 32]);
+
+    let register = async |id: &ClientIdentity| {
+        let body = json!({
+            "device_id": id.device_id_hex(),
+            "identity_pk": hex::encode(id.public_key()),
+        })
+        .to_string();
+        let req = id.sign_request(
+            "POST",
+            "/devices",
+            body.as_bytes(),
+            ClientIdentity::now_ts(),
+        );
+        let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(res.status(), StatusCode::OK);
+    };
+    register(&alice).await;
+    register(&bob).await;
+
+    // Alice sends Bob an envelope. Bob is the only recipient.
+    let env = json!({
+        "envelope_id": ulid::Ulid::new().to_string(),
+        "recipient_device_id": bob.device_id_hex(),
+        "recipient_tag": hex::encode([0x22u8; 32]),
+        "epoch": 1,
+        "seq": 1,
+        "nonce": hex::encode([0x33u8; 24]),
+        "ciphertext": base64::engine::general_purpose::STANDARD.encode([0xAAu8; 16]),
+        "content_signature": base64::engine::general_purpose::STANDARD.encode([0xBBu8; 64]),
+    });
+    let submit_body = json!({ "envelopes": [env] }).to_string();
+    let req = alice.sign_request(
+        "POST",
+        "/envelopes",
+        submit_body.as_bytes(),
+        ClientIdentity::now_ts(),
+    );
+    let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Count envelopes directly in the DB before delete.
+    let (before,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM envelopes")
+        .fetch_one(&harness.db)
+        .await
+        .expect("count before");
+    assert_eq!(before, 1);
+
+    // Bob deregisters.
+    let req = bob.sign_request("DELETE", "/devices/self", b"", ClientIdentity::now_ts());
+    let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The envelope row must be gone — otherwise it would linger until TTL.
+    let (after,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM envelopes")
+        .fetch_one(&harness.db)
+        .await
+        .expect("count after");
+    assert_eq!(after, 0, "expected the orphan envelope to be reaped");
+}
+
+#[tokio::test]
 async fn delete_self_requires_registration_first() {
     let harness = common::build_harness().await;
     let alice = ClientIdentity::from_seed([0xAF; 32]);

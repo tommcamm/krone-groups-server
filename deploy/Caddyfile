@@ -37,9 +37,15 @@
 	# Don't advertise the reverse proxy.
 	header -Server
 
-	# Caddy sets X-Forwarded-For / -Proto / -Host on the upstream request by
-	# default — no header_up overrides needed.
-	reverse_proxy server:8080
+	# Replace X-Forwarded-For with just Caddy's view of the connecting client
+	# so the upstream rate limiter can't be fooled by a client-supplied XFF.
+	# Caddy's default behavior APPENDS the peer to an existing XFF, which would
+	# let a hostile client put an attacker-chosen IP at position 0 and bypass
+	# per-IP throttles that read the leftmost entry.
+	reverse_proxy server:8080 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+	}
 
 	log {
 		output stdout

@@ -2,6 +2,11 @@ use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, anyhow};
 
+/// Hard cap on envelopes per submit request. Bumping this requires re-checking the body-size
+/// cap in `auth::signed_request::max_body_bytes` and the batch rejection in
+/// `routes::envelopes::submit`.
+pub const MAX_ENVELOPES_PER_BATCH: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub bind_addr: SocketAddr,

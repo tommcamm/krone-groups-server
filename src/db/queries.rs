@@ -1,6 +1,11 @@
 //! Typed query helpers. Kept hand-written (not via `sqlx::query!`) so the build does not
 //! require a live database.
+//!
+//! Functions that participate in a caller-supplied transaction take
+//! `&mut sqlx::SqliteConnection`. Callers pass `&mut *tx` (reborrow of a `Transaction`)
+//! so the whole sequence commits or rolls back atomically.
 
+use sqlx::SqliteConnection;
 use time::OffsetDateTime;
 
 use crate::protocol::common::{DeviceId, EnvelopeId, HexBytes, IdentityPk, Nonce, RecipientTag};
@@ -70,19 +75,32 @@ pub async fn touch_device(
     Ok(())
 }
 
-/// Delete a device and cascade its pending envelopes.
+/// Delete a device, its pending-delivery rows, and any envelopes that no longer have a
+/// recipient (otherwise the reaper only reaps envelopes whose recipient rows are all ACK'd,
+/// leaving orphans behind until TTL). Runs in a single transaction.
 pub async fn delete_device(db: &crate::db::Pool, device_id: &DeviceId) -> sqlx::Result<()> {
-    // First, drop envelope_recipients rows targeting this device (cascade will then null out
-    // envelopes that still have other recipients — we skip that subtlety here; the reaper will
-    // collect envelopes that have no remaining pending recipients).
+    let mut tx = db.begin().await?;
+
     sqlx::query("DELETE FROM envelope_recipients WHERE recipient_id = ?")
         .bind(device_id.as_bytes().as_slice())
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+
+    // Reap envelopes whose recipient set is now empty. Envelopes that still have other
+    // pending (or ACK'd) recipients keep their rows and are collected by the regular reaper.
+    sqlx::query(
+        "DELETE FROM envelopes \
+         WHERE NOT EXISTS (SELECT 1 FROM envelope_recipients r WHERE r.envelope_id = envelopes.envelope_id)",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query("DELETE FROM devices WHERE device_id = ?")
         .bind(device_id.as_bytes().as_slice())
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -104,9 +122,13 @@ pub struct InsertEnvelope<'a> {
 
 /// Insert one envelope + its single recipient-fanout row. Idempotent on envelope_id.
 /// Returns `true` if the row was newly inserted, `false` if it already existed.
-pub async fn insert_envelope(db: &crate::db::Pool, e: InsertEnvelope<'_>) -> sqlx::Result<bool> {
-    let mut tx = db.begin().await?;
-
+///
+/// Runs on the caller-supplied executor so `submit` can batch the count-then-insert pair
+/// inside a single transaction and avoid TOCTOU on per-sender / per-recipient caps.
+pub async fn insert_envelope_with(
+    conn: &mut SqliteConnection,
+    e: InsertEnvelope<'_>,
+) -> sqlx::Result<bool> {
     let env_id_bytes = e.envelope_id.as_bytes();
 
     let inserted = sqlx::query(
@@ -124,7 +146,7 @@ pub async fn insert_envelope(db: &crate::db::Pool, e: InsertEnvelope<'_>) -> sql
     .bind(e.seq as i64)
     .bind(e.created_at.unix_timestamp())
     .bind(e.expires_at.unix_timestamp())
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
 
     if inserted.rows_affected() > 0 {
@@ -134,21 +156,30 @@ pub async fn insert_envelope(db: &crate::db::Pool, e: InsertEnvelope<'_>) -> sql
         )
         .bind(env_id_bytes.as_slice())
         .bind(e.recipient_device_id.as_bytes().as_slice())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
 
-    tx.commit().await?;
     Ok(inserted.rows_affected() > 0)
 }
 
-/// Count pending (not-ACK'd) envelopes for a given recipient device.
+/// Count pending (not-ACK'd) envelopes for a given recipient device. Convenience
+/// wrapper for callers that only need a single query (tests, diagnostics).
 pub async fn count_pending(db: &crate::db::Pool, recipient: &DeviceId) -> sqlx::Result<i64> {
+    let mut conn = db.acquire().await?;
+    count_pending_with(&mut conn, recipient).await
+}
+
+/// Count pending (not-ACK'd) envelopes for a given recipient device.
+pub async fn count_pending_with(
+    conn: &mut SqliteConnection,
+    recipient: &DeviceId,
+) -> sqlx::Result<i64> {
     let (n,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM envelope_recipients WHERE recipient_id = ? AND acked_at IS NULL",
     )
     .bind(recipient.as_bytes().as_slice())
-    .fetch_one(db)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(n)
 }
@@ -293,9 +324,10 @@ fn parse_cursor(s: Option<&str>) -> Option<(i64, [u8; 16])> {
 }
 
 /// Count envelopes sent by `sender` in the last `window_secs` seconds. Used for per-device
-/// submission rate limiting.
-pub async fn count_sent_in_window(
-    db: &crate::db::Pool,
+/// submission rate limiting. Runs on the caller-supplied executor so the check can share the
+/// submit transaction.
+pub async fn count_sent_in_window_with(
+    conn: &mut SqliteConnection,
     sender: &DeviceId,
     now: OffsetDateTime,
     window_secs: i64,
@@ -305,7 +337,7 @@ pub async fn count_sent_in_window(
         sqlx::query_as("SELECT COUNT(*) FROM envelopes WHERE sender_id = ? AND created_at > ?")
             .bind(sender.as_bytes().as_slice())
             .bind(cutoff)
-            .fetch_one(db)
+            .fetch_one(&mut *conn)
             .await?;
     Ok(n)
 }
