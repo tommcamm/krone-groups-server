@@ -342,6 +342,40 @@ pub async fn count_sent_in_window_with(
     Ok(n)
 }
 
+// ---- Anti-replay cache ----
+
+/// Record that we've just accepted a valid (device_id, signature) pair. Returns `true`
+/// if this is the first sighting, `false` if the pair was already in the cache (replay).
+pub async fn record_signature_seen(
+    db: &crate::db::Pool,
+    device_id: &DeviceId,
+    signature: &[u8; 64],
+    now: OffsetDateTime,
+) -> sqlx::Result<bool> {
+    let res = sqlx::query(
+        "INSERT OR IGNORE INTO seen_signatures (device_id, signature, seen_at) VALUES (?, ?, ?)",
+    )
+    .bind(device_id.as_bytes().as_slice())
+    .bind(&signature[..])
+    .bind(now.unix_timestamp())
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Remove cached signatures older than `cutoff`. Anything past that is safe to prune —
+/// the corresponding request's timestamp would already fail the skew check.
+pub async fn reap_seen_signatures(
+    db: &crate::db::Pool,
+    cutoff: OffsetDateTime,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query("DELETE FROM seen_signatures WHERE seen_at < ?")
+        .bind(cutoff.unix_timestamp())
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 /// Reaper: remove fully-ACK'd envelopes and anything past TTL. Returns rows deleted.
 pub async fn reap_envelopes(db: &crate::db::Pool, now: OffsetDateTime) -> sqlx::Result<u64> {
     // Fully ACK'd: every row in envelope_recipients for the envelope has acked_at IS NOT NULL.

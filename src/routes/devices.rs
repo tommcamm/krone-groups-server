@@ -43,7 +43,9 @@ async fn register(
     }
 
     // Verify the signature using the pubkey the caller is registering.
-    signed.verify_with(body.identity_pk.as_bytes())?;
+    signed
+        .verify_with(&state, body.identity_pk.as_bytes())
+        .await?;
 
     let now = OffsetDateTime::now_utc();
     let registered_at =
@@ -68,7 +70,7 @@ async fn delete_self(
     let pk = queries::get_device_pk(&state.db, &signed.device_id)
         .await?
         .ok_or(ApiError::Unauthorized("unknown device"))?;
-    signed.verify_with(&pk)?;
+    signed.verify_with(&state, &pk).await?;
 
     if !signed.body_bytes.is_empty() {
         return Err(ApiError::BadRequest(

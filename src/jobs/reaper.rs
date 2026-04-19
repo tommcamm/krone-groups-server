@@ -1,8 +1,9 @@
-//! Periodic background task that removes fully-ACK'd envelopes and anything past TTL.
+//! Periodic background task that removes fully-ACK'd envelopes and anything past TTL,
+//! plus prunes the anti-replay signature cache outside the skew window.
 
 use std::time::Duration;
 
-use time::OffsetDateTime;
+use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::task::JoinHandle;
 
 use crate::db::queries;
@@ -22,11 +23,29 @@ pub fn spawn(state: AppState, tick: Duration) -> JoinHandle<()> {
                 Ok(n) => tracing::info!(deleted = n, "reaper removed envelopes"),
                 Err(e) => tracing::warn!(error = %e, "reaper error"),
             }
+            let cutoff = now - seen_signature_retention(&state);
+            match queries::reap_seen_signatures(&state.db, cutoff).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(deleted = n, "reaper pruned seen signatures"),
+                Err(e) => tracing::warn!(error = %e, "seen-signature reaper error"),
+            }
         }
     })
 }
 
-/// Trigger a single reap pass — used by tests and tooling.
+/// Trigger a single reap pass — used by tests and tooling. Runs envelope + seen-signature
+/// cleanup in sequence using the same clock.
 pub async fn reap_once(state: &AppState, now: OffsetDateTime) -> sqlx::Result<u64> {
-    queries::reap_envelopes(&state.db, now).await
+    let envelopes = queries::reap_envelopes(&state.db, now).await?;
+    let cutoff = now - seen_signature_retention(state);
+    let seen = queries::reap_seen_signatures(&state.db, cutoff).await?;
+    Ok(envelopes + seen)
+}
+
+/// Retention window for the seen-signature cache: 2× the configured clock skew plus a
+/// minute of slack. Any row older than this is safe to drop — a matching timestamp would
+/// already fail the signed-request skew check before reaching the cache.
+fn seen_signature_retention(state: &AppState) -> TimeDuration {
+    let skew = state.cfg.policy.clock_skew_seconds;
+    TimeDuration::seconds(skew.saturating_mul(2).saturating_add(60))
 }

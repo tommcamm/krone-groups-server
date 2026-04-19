@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 
 use krone_groups_server::config::AppConfig;
 use krone_groups_server::jobs::reaper;
@@ -10,6 +10,13 @@ use krone_groups_server::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Healthcheck mode: TCP-connect to the bound port and exit 0 / non-zero. Used by the
+    // Docker HEALTHCHECK in `deploy/docker-compose.yml`; the distroless runtime has no
+    // curl/wget/shell, so the binary has to probe itself.
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return run_healthcheck().await;
+    }
+
     init_tracing();
 
     let cfg = AppConfig::from_env().context("load config from env")?;
@@ -48,6 +55,27 @@ fn init_tracing() {
         .with(filter)
         .with(fmt::layer().with_target(false))
         .init();
+}
+
+async fn run_healthcheck() -> anyhow::Result<()> {
+    let bind = std::env::var("KRONE_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let bind_addr: SocketAddr = bind
+        .parse()
+        .with_context(|| format!("parse KRONE_BIND={bind}"))?;
+    // Always connect via loopback — the server may bind 0.0.0.0 but the healthcheck
+    // runs inside the container.
+    let target: SocketAddr = format!("127.0.0.1:{}", bind_addr.port())
+        .parse()
+        .expect("loopback addr");
+
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(target),
+    )
+    .await
+    .map_err(|_| anyhow!("healthcheck timed out connecting to {target}"))?
+    .with_context(|| format!("healthcheck tcp connect to {target}"))?;
+    Ok(())
 }
 
 async fn shutdown_signal() {

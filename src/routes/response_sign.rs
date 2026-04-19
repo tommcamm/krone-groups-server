@@ -3,7 +3,7 @@
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::HeaderValue;
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use base64::Engine;
@@ -41,6 +41,10 @@ pub async fn sign_responses(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "response body exceeded buffer cap");
+            // Preserving the original (likely 2xx) status would ship a success status with a
+            // failure body — return a proper 500 so clients treat it as the error it is.
+            parts.status = StatusCode::INTERNAL_SERVER_ERROR;
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
             return Response::from_parts(parts, Body::from("internal error"));
         }
     };

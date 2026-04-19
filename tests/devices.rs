@@ -49,13 +49,12 @@ async fn register_is_idempotent() {
     })
     .to_string();
 
-    for _ in 0..3 {
-        let req = alice.sign_request(
-            "POST",
-            "/devices",
-            body.as_bytes(),
-            ClientIdentity::now_ts(),
-        );
+    // Use a distinct timestamp per iteration — this test is about DB-level idempotency
+    // of the same device_id, NOT wire-level replay (which is correctly rejected by the
+    // signature cache).
+    let base = ClientIdentity::now_ts();
+    for i in 0..3 {
+        let req = alice.sign_request("POST", "/devices", body.as_bytes(), base + i);
         let res = harness.router.clone().oneshot(req).await.expect("oneshot");
         assert_eq!(res.status(), StatusCode::OK);
     }

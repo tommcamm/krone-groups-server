@@ -27,6 +27,14 @@ pub fn load_or_generate_keypair(data_dir: &Path, seed_hex: Option<&str>) -> Resu
 
     // Prefer on-disk key when it exists — it is the server identity.
     if key_path.exists() {
+        if seed_hex.is_some() {
+            tracing::warn!(
+                key_path = %key_path.display(),
+                "KRONE_SERVER_SEED is set but a persisted server-key already exists — \
+                 the on-disk key wins. Delete the key file (and lose user TOFU pinning) \
+                 if you actually want to rotate to the env-supplied seed."
+            );
+        }
         let mut seed = [0u8; 32];
         let raw = std::fs::read(&key_path)
             .with_context(|| format!("read server key at {}", key_path.display()))?;

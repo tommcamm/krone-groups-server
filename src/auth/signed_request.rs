@@ -81,6 +81,18 @@ where
         verify_ed25519(&pk, &input, &parsed.signature)
             .map_err(|_| ApiError::Unauthorized("bad signature"))?;
 
+        // Anti-replay: reject if we've already seen this exact (device_id, signature).
+        let is_new = queries::record_signature_seen(
+            &state.db,
+            &parsed.device_id,
+            &parsed.signature,
+            now_utc(),
+        )
+        .await?;
+        if !is_new {
+            return Err(ApiError::Unauthorized("request replay detected"));
+        }
+
         // Best-effort observability tick.
         let _ = queries::touch_device(&state.db, &parsed.device_id, now_utc()).await;
 
@@ -122,9 +134,14 @@ impl FromRequest<AppState> for RawSignedRequest {
 }
 
 impl RawSignedRequest {
-    /// Verify this request's signature against a supplied public key (used by
-    /// `POST /devices`, which extracts the pubkey from the request body).
-    pub fn verify_with(&self, public_key: &[u8; 32]) -> Result<(), ApiError> {
+    /// Verify this request's signature against a supplied public key and record the
+    /// (device_id, signature) pair in the anti-replay cache. Used by `POST /devices`
+    /// (pubkey in body) and signed GET/DELETE endpoints whose body type is `()`.
+    pub async fn verify_with(
+        &self,
+        state: &AppState,
+        public_key: &[u8; 32],
+    ) -> Result<(), ApiError> {
         let input = request_signing_input(
             self.timestamp,
             &self.device_id.to_hex(),
@@ -133,7 +150,15 @@ impl RawSignedRequest {
             &self.body_bytes,
         );
         verify_ed25519(public_key, &input, &self.signature)
-            .map_err(|_| ApiError::Unauthorized("bad signature"))
+            .map_err(|_| ApiError::Unauthorized("bad signature"))?;
+
+        let is_new =
+            queries::record_signature_seen(&state.db, &self.device_id, &self.signature, now_utc())
+                .await?;
+        if !is_new {
+            return Err(ApiError::Unauthorized("request replay detected"));
+        }
+        Ok(())
     }
 
     pub fn body_json<T: DeserializeOwned>(&self) -> Result<T, ApiError> {
@@ -157,7 +182,9 @@ fn parse_signature_headers(
 
     let skew = state.cfg.policy.clock_skew_seconds;
     let now_secs = now_utc().unix_timestamp();
-    if (now_secs - timestamp).abs() > skew {
+    // Saturating ops so a pathological i64::MIN timestamp can't panic the arithmetic.
+    // saturating_abs on i64::MIN returns i64::MAX, which is correctly > any finite skew.
+    if now_secs.saturating_sub(timestamp).saturating_abs() > skew {
         return Err(ApiError::Unauthorized("timestamp skew exceeded"));
     }
 

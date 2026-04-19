@@ -61,15 +61,14 @@ async fn full_round_trip() {
     register(&harness, &alice).await;
     register(&harness, &bob).await;
 
+    // Step timestamps per signed request so none collide with the replay cache when the
+    // whole test runs inside a single second.
+    let t0 = ClientIdentity::now_ts() + 10;
+
     // Alice submits an envelope to Bob.
     let (env_id, env) = sample_envelope(&bob.device_id_hex());
     let submit_body = json!({ "envelopes": [env] }).to_string();
-    let req = alice.sign_request(
-        "POST",
-        "/envelopes",
-        submit_body.as_bytes(),
-        ClientIdentity::now_ts(),
-    );
+    let req = alice.sign_request("POST", "/envelopes", submit_body.as_bytes(), t0);
     let res = harness.router.clone().oneshot(req).await.expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
@@ -81,7 +80,7 @@ async fn full_round_trip() {
     );
 
     // Bob reads inbox.
-    let req = bob.sign_request("GET", "/envelopes/inbox", b"", ClientIdentity::now_ts());
+    let req = bob.sign_request("GET", "/envelopes/inbox", b"", t0 + 1);
     let res = harness.router.clone().oneshot(req).await.expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
@@ -103,12 +102,7 @@ async fn full_round_trip() {
 
     // Bob acks.
     let ack_body = json!({ "envelope_ids": [env_id.to_string()] }).to_string();
-    let req = bob.sign_request(
-        "POST",
-        "/envelopes/ack",
-        ack_body.as_bytes(),
-        ClientIdentity::now_ts(),
-    );
+    let req = bob.sign_request("POST", "/envelopes/ack", ack_body.as_bytes(), t0 + 2);
     let res = harness.router.clone().oneshot(req).await.expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
@@ -116,7 +110,7 @@ async fn full_round_trip() {
     assert_eq!(parsed["acknowledged"].as_u64().expect("n"), 1);
 
     // Second inbox read is empty.
-    let req = bob.sign_request("GET", "/envelopes/inbox", b"", ClientIdentity::now_ts());
+    let req = bob.sign_request("GET", "/envelopes/inbox", b"", t0 + 3);
     let res = harness.router.clone().oneshot(req).await.expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
@@ -140,13 +134,11 @@ async fn duplicate_envelope_id_is_idempotent() {
     let (env_id, env) = sample_envelope(&bob.device_id_hex());
     let submit_body = json!({ "envelopes": [env.clone()] }).to_string();
 
-    for _ in 0..3 {
-        let req = alice.sign_request(
-            "POST",
-            "/envelopes",
-            submit_body.as_bytes(),
-            ClientIdentity::now_ts(),
-        );
+    // Distinct timestamps per iteration so this exercises envelope_id-level idempotency
+    // rather than the wire-level replay cache.
+    let base = ClientIdentity::now_ts();
+    for i in 0..3 {
+        let req = alice.sign_request("POST", "/envelopes", submit_body.as_bytes(), base + i);
         let res = harness.router.clone().oneshot(req).await.expect("oneshot");
         assert_eq!(res.status(), StatusCode::OK);
     }

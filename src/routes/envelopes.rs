@@ -124,7 +124,7 @@ async fn inbox(
     let pk = queries::get_device_pk(&state.db, &signed.device_id)
         .await?
         .ok_or(ApiError::Unauthorized("unknown device"))?;
-    signed.verify_with(&pk)?;
+    signed.verify_with(&state, &pk).await?;
 
     if !signed.body_bytes.is_empty() {
         return Err(ApiError::BadRequest("inbox expects empty body".into()));
