@@ -1,17 +1,45 @@
-{
-	email {$TLS_EMAIL}
+# =============================================================================
+# Krone relay — Caddy reverse proxy.
+#
+# TLS mode is selected via KRONE_TLS_MODE in deploy/.env:
+#   letsencrypt  (default) — Caddy obtains and renews a Let's Encrypt cert.
+#                            Requires DOMAIN + TLS_EMAIL and that ports 80/443
+#                            are reachable from the public internet.
+#   custom                  — Operator drops fullchain.pem + privkey.pem into
+#                            deploy/certs/. Use this for Cloudflare Origin CA,
+#                            internal PKI, or any non-ACME cert source.
+#
+# The site block imports `tls_<mode>` from the snippets below. See README.md
+# for end-to-end setup recipes.
+# =============================================================================
+
+(tls_letsencrypt) {
+	tls {$TLS_EMAIL}
+}
+
+(tls_custom) {
+	tls /certs/fullchain.pem /certs/privkey.pem
+}
+
+# Port 80 → 443. Caddy's auto-HTTPS does this in LE mode, but in custom mode
+# there's no ACME flow so the redirect must be declared explicitly.
+:80 {
+	redir https://{host}{uri} permanent
 }
 
 {$DOMAIN} {
+	import tls_{$KRONE_TLS_MODE}
+
 	encode zstd gzip
 
-	# Forward real client IP so tower_governor sees the actual origin.
-	header_up X-Forwarded-For {remote_host}
-	header_up X-Real-IP {remote_host}
+	# 1-year HSTS. Add `preload` once you've submitted to hstspreload.org.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	# Don't advertise the reverse proxy.
+	header -Server
 
-	reverse_proxy server:8080 {
-		header_up X-Forwarded-Proto {scheme}
-	}
+	# Caddy sets X-Forwarded-For / -Proto / -Host on the upstream request by
+	# default — no header_up overrides needed.
+	reverse_proxy server:8080
 
 	log {
 		output stdout

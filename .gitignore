@@ -1,6 +1,8 @@
 /target
 /data
 /deploy/.env
+/deploy/certs/*
+!/deploy/certs/.gitkeep
 *.sqlite
 *.sqlite-journal
 *.sqlite-shm

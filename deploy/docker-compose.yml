@@ -26,11 +26,15 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mounted in every mode. In `letsencrypt` mode it is unused; in `custom`
+      # mode it must contain fullchain.pem + privkey.pem before starting Caddy.
+      - ./certs:/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     environment:
       DOMAIN: "${DOMAIN}"
-      TLS_EMAIL: "${TLS_EMAIL}"
+      TLS_EMAIL: "${TLS_EMAIL:-}"
+      KRONE_TLS_MODE: "${KRONE_TLS_MODE:-letsencrypt}"
 
 volumes:
   server_data:

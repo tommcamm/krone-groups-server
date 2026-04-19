@@ -12,18 +12,98 @@ Zero-metadata, end-to-end-encrypted message relay for the Krone app's Groups fea
 git clone --recurse-submodules https://github.com/tommcamm/krone-groups-server
 cd krone-groups-server/deploy
 cp .env.example .env
-$EDITOR .env                       # set DOMAIN + TLS_EMAIL
+$EDITOR .env                       # at minimum set DOMAIN
 docker compose up -d
 docker compose logs server | grep "server identity"
 ```
 
 The last line prints your server's Ed25519 public key and its 8-word BIP-39 fingerprint. Share the fingerprint with users out-of-band (phone, chat, in person) so they can verify it when enrolling.
 
-Check:
+Sanity check:
 
 ```bash
 curl -s https://$DOMAIN/server-info | jq
 ```
+
+## Deployment recipes
+
+Caddy fronts the relay and terminates TLS. Pick one of the three recipes below by setting `KRONE_TLS_MODE` in `deploy/.env`. All recipes apply the same hardening: HSTS (`max-age=31536000; includeSubDomains`), dropped `Server` header, and an explicit `:80 → :443` redirect.
+
+The relay container itself only `expose`s port 8080 on the compose network — it is never published to the host. **Do not add `ports:` to the `server` service;** that bypasses Caddy and breaks the signed-response middleware's transport guarantees.
+
+### 1. Let's Encrypt (default)
+
+Best for: most self-hosters with a public DNS record and ports 80/443 open.
+
+```env
+# deploy/.env
+DOMAIN=groups.example.com
+KRONE_TLS_MODE=letsencrypt
+TLS_EMAIL=ops@example.com
+```
+
+```bash
+cd deploy
+docker compose up -d
+```
+
+Caddy runs the ACME HTTP-01 challenge automatically and renews ~30 days before expiry. No cron, no certbot, no manual rotation. Requires `groups.example.com` to resolve to the host and TCP 80 + 443 to be reachable from the internet.
+
+### 2. Cloudflare (Origin CA + Full (Strict))
+
+Best for: deployments behind Cloudflare's CDN/WAF that want end-to-end encryption from browser → CF edge → origin without public ACME.
+
+1. In the Cloudflare dashboard, open **SSL/TLS → Origin Server → Create Certificate**. Accept the defaults (RSA 2048, all your hostnames, 15-year validity). Copy the certificate and private key.
+2. Save them on the server as:
+
+   ```text
+   deploy/certs/fullchain.pem   # the "Origin Certificate" block
+   deploy/certs/privkey.pem     # the "Private Key" block (chmod 600)
+   ```
+
+3. Configure `.env`:
+
+   ```env
+   DOMAIN=groups.example.com
+   KRONE_TLS_MODE=custom
+   # TLS_EMAIL can be left empty in custom mode.
+   ```
+
+4. In Cloudflare: **SSL/TLS → Overview → Full (Strict)**. This makes CF verify the origin cert against CF's Origin CA — without it, CF would accept any cert and the extra hop is unauthenticated.
+5. Proxy the hostname (orange cloud) and start the stack:
+
+   ```bash
+   cd deploy
+   docker compose up -d
+   ```
+
+Origin certs are valid for 15 years by default — set a calendar reminder anyway. When you rotate, replace both pem files and `docker compose restart caddy`.
+
+### 3. Fully custom certs (internal PKI, self-signed, other ACME client)
+
+Best for: internal deployments, corporate PKI, or using your own ACME client (step-ca, dehydrated, certbot) that manages renewal.
+
+1. Produce (or provision) `fullchain.pem` + `privkey.pem` and drop them into `deploy/certs/`. The filenames are fixed — symlink if your issuer uses different names:
+
+   ```bash
+   ln -sf /etc/letsencrypt/live/groups.example.com/fullchain.pem deploy/certs/fullchain.pem
+   ln -sf /etc/letsencrypt/live/groups.example.com/privkey.pem   deploy/certs/privkey.pem
+   ```
+
+2. `.env`:
+
+   ```env
+   DOMAIN=groups.example.com
+   KRONE_TLS_MODE=custom
+   ```
+
+3. `docker compose up -d`.
+
+Rotation is your responsibility: after your external tool renews, `docker compose restart caddy` (or `docker compose kill -s SIGUSR1 caddy` for a hot reload). Caddy does not do OCSP stapling or automatic reload for externally managed certs.
+
+### Switching modes later
+
+Edit `KRONE_TLS_MODE` in `.env`, populate/remove `deploy/certs/*.pem` as needed, and run `docker compose up -d` — compose will recreate the Caddy container with the new config. The server's identity key (`server_data` volume) is untouched by TLS changes.
 
 ## Develop
 
