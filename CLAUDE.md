@@ -12,12 +12,14 @@ Paired repos: Android client at `/home/tommy/Documents/AndroidProjects/Krone/`, 
 
 ```bash
 cargo build                  # debug
-cargo test                   # all unit + integration tests
+cargo test                   # all unit + integration tests (fast; skips #[ignore]'d e2e)
 cargo test --test envelopes_flow       # one integration test file
 cargo test full_round_trip             # one test by name
+cargo test --test e2e -- --ignored     # spawn the real binary, hit it over TCP (slow-ish)
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo run                    # binds KRONE_BIND (default 0.0.0.0:8080), writes ./data/
+cargo run --example gen_vectors > protocol/vectors/signing_vectors.json  # regenerate cross-language signing vectors
 ```
 
 Submodule: after a fresh clone, run `git submodule update --init` (or clone with `--recurse-submodules`). Without it `protocol/` is empty and `tests/protocol_schema.rs` will fail.
@@ -54,6 +56,10 @@ Layered design:
 Integration tests (`tests/*.rs`) use `tests/common/mod.rs::build_harness()`, which spins up an in-process `Router` with a temp SQLite and a **deterministic server seed** (`TEST_SERVER_SEED_HEX`, all `0x11`) so response signatures are reproducible. Tests drive the router with `tower::ServiceExt::oneshot` — this is why `router_for_tests()` exists (no governor). `tests/common/signing.rs::ClientIdentity` signs requests exactly like a real client. When adding a signed endpoint, add an integration test in `tests/` that uses `ClientIdentity::sign_request(...)` rather than reaching into the server's own signing helpers — that's what guarantees the wire format stays compatible.
 
 Schema tests (`tests/protocol_schema.rs`) validate server request/response shapes against `protocol/schemas/*.json` — if you change a shape, update both the schema in the submodule and the vectors.
+
+Signing-vector tests (`tests/protocol_vectors.rs`) regenerate every entry in `protocol/vectors/signing_vectors.json` from the recorded inputs and assert byte-for-byte equality with the stored `body_sha256_hex`, `signing_input_hex`, and `signature_b64`. This is the parity contract with the Android client; if you deliberately change the wire format, regenerate the vectors via `cargo run --example gen_vectors` (seeds are fixed in the example) and update every implementation in lockstep.
+
+E2E tests (`tests/e2e.rs`) are the only suite that spawns the real server binary over a real TCP socket. They're gated behind `#[ignore]` because each one pays a ~200ms process-startup cost; run them with `cargo test --test e2e -- --ignored`. They're the only place the `tower_governor` rate limiter is actually exercised (the oneshot harness uses `router_for_tests()`), so they're worth running before tagging a release or handing off to the Android client. Each test picks its own port, tempdir, and deterministic server seed so they run in parallel.
 
 ## Deploy
 

@@ -14,6 +14,12 @@ pub struct ClientIdentity {
     pub device_id: [u8; 16],
 }
 
+pub struct SignedHeaders {
+    pub device_id: String,
+    pub timestamp: String,
+    pub signature_b64: String,
+}
+
 impl ClientIdentity {
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(&seed);
@@ -35,13 +41,13 @@ impl ClientIdentity {
         hex::encode(self.device_id)
     }
 
-    pub fn sign_request(
+    pub fn sign_headers(
         &self,
         method: &str,
         path_with_query: &str,
         body: &[u8],
         timestamp: i64,
-    ) -> Request<Body> {
+    ) -> SignedHeaders {
         let input = build_signing_input(
             timestamp,
             &self.device_id_hex(),
@@ -50,23 +56,36 @@ impl ClientIdentity {
             body,
         );
         let sig = self.signing_key.sign(&input).to_bytes();
-        let sig_b64 = B64.encode(sig);
+        SignedHeaders {
+            device_id: self.device_id_hex(),
+            timestamp: timestamp.to_string(),
+            signature_b64: B64.encode(sig),
+        }
+    }
 
+    pub fn sign_request(
+        &self,
+        method: &str,
+        path_with_query: &str,
+        body: &[u8],
+        timestamp: i64,
+    ) -> Request<Body> {
+        let h = self.sign_headers(method, path_with_query, body, timestamp);
         Request::builder()
             .method(method)
             .uri(path_with_query)
             .header("content-type", "application/json")
             .header(
                 "x-krone-device-id",
-                HeaderValue::from_str(&self.device_id_hex()).expect("ascii"),
+                HeaderValue::from_str(&h.device_id).expect("ascii"),
             )
             .header(
                 "x-krone-timestamp",
-                HeaderValue::from_str(&timestamp.to_string()).expect("ascii"),
+                HeaderValue::from_str(&h.timestamp).expect("ascii"),
             )
             .header(
                 "x-krone-signature",
-                HeaderValue::from_str(&sig_b64).expect("ascii"),
+                HeaderValue::from_str(&h.signature_b64).expect("ascii"),
             )
             .body(Body::from(body.to_vec()))
             .expect("build request")

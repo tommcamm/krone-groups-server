@@ -1139,6 +1139,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "jsonschema",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
