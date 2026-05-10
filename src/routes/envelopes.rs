@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::auth::{RawSignedRequest, SignedRequest};
 use crate::config::MAX_ENVELOPES_PER_BATCH;
-use crate::db::queries::{self, InsertEnvelope};
+use crate::db::queries::{self, InsertEnvelope, InsertEnvelopeOutcome};
 use crate::error::ApiError;
 use crate::protocol::envelope::{
     AckRequest, AckResponse, EnvelopeSubmitRequest, EnvelopeSubmitResponse, InboxResponse,
@@ -82,7 +82,7 @@ async fn submit(
 
         // Idempotent on envelope_id: a replay with the same id is reported as accepted
         // but not re-inserted.
-        let _inserted = queries::insert_envelope_with(
+        let outcome = queries::insert_envelope_with(
             &mut tx,
             InsertEnvelope {
                 envelope_id: &env.envelope_id,
@@ -99,6 +99,12 @@ async fn submit(
             },
         )
         .await?;
+
+        if outcome == InsertEnvelopeOutcome::Conflict {
+            return Err(ApiError::Conflict(
+                "envelope_id already exists with different content",
+            ));
+        }
 
         accepted.push(env.envelope_id);
     }

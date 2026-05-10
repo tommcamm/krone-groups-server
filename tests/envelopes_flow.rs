@@ -157,6 +157,30 @@ async fn duplicate_envelope_id_is_idempotent() {
 }
 
 #[tokio::test]
+async fn duplicate_envelope_id_with_different_content_conflicts() {
+    let harness = common::build_harness().await;
+    let alice = ClientIdentity::from_seed([0x34; 32]);
+    let bob = ClientIdentity::from_seed([0x45; 32]);
+
+    register(&harness, &alice).await;
+    register(&harness, &bob).await;
+
+    let (_env_id, mut env) = sample_envelope(&bob.device_id_hex());
+    let submit_body = json!({ "envelopes": [env.clone()] }).to_string();
+    let base = ClientIdentity::now_ts();
+
+    let req = alice.sign_request("POST", "/envelopes", submit_body.as_bytes(), base);
+    let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+
+    env["ciphertext"] = json!(base64_std(&[0xAC; 64]));
+    let conflicting_body = json!({ "envelopes": [env] }).to_string();
+    let req = alice.sign_request("POST", "/envelopes", conflicting_body.as_bytes(), base + 1);
+    let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn sender_cannot_address_self() {
     let harness = common::build_harness().await;
     let alice = ClientIdentity::from_seed([0x55; 32]);

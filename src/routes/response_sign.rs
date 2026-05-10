@@ -1,9 +1,10 @@
 //! Middleware that signs every outgoing response with the server Ed25519 key
 //! and attaches `x-server-signature` + `x-request-id` headers.
 
+use axum::body::Bytes;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, response::Parts};
 use axum::middleware::Next;
 use axum::response::Response;
 use base64::Engine;
@@ -45,21 +46,26 @@ pub async fn sign_responses(
             // failure body — return a proper 500 so clients treat it as the error it is.
             parts.status = StatusCode::INTERNAL_SERVER_ERROR;
             parts.headers.remove(axum::http::header::CONTENT_LENGTH);
-            return Response::from_parts(parts, Body::from("internal error"));
+            let bytes = Bytes::from_static(b"internal error");
+            attach_signature(&mut parts, &request_id, &state, &bytes);
+            return Response::from_parts(parts, Body::from(bytes));
         }
     };
 
+    attach_signature(&mut parts, &request_id, &state, &bytes);
+    Response::from_parts(parts, Body::from(bytes))
+}
+
+fn attach_signature(parts: &mut Parts, request_id: &str, state: &AppState, bytes: &[u8]) {
     let status = parts.status.as_u16();
-    let input = response_signing_input(&request_id, status, &bytes);
+    let input = response_signing_input(request_id, status, bytes);
     let sig = state.signer.sign(&input);
     let sig_b64 = B64.encode(sig);
 
     if let Ok(hv) = HeaderValue::from_str(&sig_b64) {
         parts.headers.insert(SERVER_SIG_HEADER, hv);
     }
-    if let Ok(hv) = HeaderValue::from_str(&request_id) {
+    if let Ok(hv) = HeaderValue::from_str(request_id) {
         parts.headers.insert(REQUEST_ID_HEADER, hv);
     }
-
-    Response::from_parts(parts, Body::from(bytes))
 }

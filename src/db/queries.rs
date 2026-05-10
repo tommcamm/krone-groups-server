@@ -120,15 +120,23 @@ pub struct InsertEnvelope<'a> {
     pub expires_at: OffsetDateTime,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertEnvelopeOutcome {
+    Inserted,
+    AlreadyExists,
+    Conflict,
+}
+
 /// Insert one envelope + its single recipient-fanout row. Idempotent on envelope_id.
-/// Returns `true` if the row was newly inserted, `false` if it already existed.
+/// Returns whether the row was newly inserted, was an exact idempotent duplicate, or conflicted
+/// with different content under the same `envelope_id`.
 ///
 /// Runs on the caller-supplied executor so `submit` can batch the count-then-insert pair
 /// inside a single transaction and avoid TOCTOU on per-sender / per-recipient caps.
 pub async fn insert_envelope_with(
     conn: &mut SqliteConnection,
     e: InsertEnvelope<'_>,
-) -> sqlx::Result<bool> {
+) -> sqlx::Result<InsertEnvelopeOutcome> {
     let env_id_bytes = e.envelope_id.as_bytes();
 
     let inserted = sqlx::query(
@@ -158,9 +166,57 @@ pub async fn insert_envelope_with(
         .bind(e.recipient_device_id.as_bytes().as_slice())
         .execute(&mut *conn)
         .await?;
+
+        return Ok(InsertEnvelopeOutcome::Inserted);
     }
 
-    Ok(inserted.rows_affected() > 0)
+    if existing_envelope_matches(conn, &e, env_id_bytes.as_slice()).await? {
+        Ok(InsertEnvelopeOutcome::AlreadyExists)
+    } else {
+        Ok(InsertEnvelopeOutcome::Conflict)
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ExistingEnvelope {
+    sender_id: Vec<u8>,
+    recipient_id: Vec<u8>,
+    recipient_tag: Vec<u8>,
+    ciphertext: Vec<u8>,
+    signature: Vec<u8>,
+    nonce: Vec<u8>,
+    epoch: i64,
+    seq: i64,
+}
+
+async fn existing_envelope_matches(
+    conn: &mut SqliteConnection,
+    e: &InsertEnvelope<'_>,
+    envelope_id: &[u8],
+) -> sqlx::Result<bool> {
+    let existing: Option<ExistingEnvelope> = sqlx::query_as(
+        "SELECT e.sender_id, r.recipient_id, e.recipient_tag, e.ciphertext, e.signature, \
+                e.nonce, e.epoch, e.seq \
+         FROM envelopes e \
+         INNER JOIN envelope_recipients r ON r.envelope_id = e.envelope_id \
+         WHERE e.envelope_id = ?",
+    )
+    .bind(envelope_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+
+    Ok(existing.sender_id == e.sender_id.as_bytes().as_slice()
+        && existing.recipient_id == e.recipient_device_id.as_bytes().as_slice()
+        && existing.recipient_tag == e.recipient_tag.as_bytes().as_slice()
+        && existing.ciphertext == e.ciphertext
+        && existing.signature == e.content_signature
+        && existing.nonce == e.nonce.as_bytes().as_slice()
+        && existing.epoch == e.epoch as i64
+        && existing.seq == e.seq as i64)
 }
 
 /// Count pending (not-ACK'd) envelopes for a given recipient device. Convenience
