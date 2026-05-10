@@ -180,9 +180,11 @@ If your deployment adds reverse-proxy access logging, consider disabling it or s
 | `GET` | `/server-info` | no | pubkey + policy (signed response) |
 | `POST` | `/devices` | yes (pubkey in body) | register device |
 | `DELETE` | `/devices/self` | yes | unregister + purge pending |
-| `POST` | `/envelopes` | yes | submit one or more encrypted envelopes |
+| `POST` | `/envelopes` | yes | submit encrypted envelopes to registered recipient devices |
 | `GET` | `/envelopes/inbox?since=<cursor>&limit=<n>` | yes | fetch pending envelopes |
 | `POST` | `/envelopes/ack` | yes | acknowledge delivery |
+
+`POST /envelopes` rejects unknown `recipient_device_id` values; recipients must register with `POST /devices` before they can receive pending envelopes.
 
 Full schemas: `protocol/schemas/`. Canonical signed-request test vector: `protocol/vectors/signed_request.json`.
 

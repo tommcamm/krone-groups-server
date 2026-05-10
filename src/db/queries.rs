@@ -75,6 +75,19 @@ pub async fn touch_device(
     Ok(())
 }
 
+/// Return true when a device row exists. Runs on the caller-supplied connection so submit
+/// can check recipient existence in the same transaction as envelope insertion.
+pub async fn device_exists_with(
+    conn: &mut SqliteConnection,
+    device_id: &DeviceId,
+) -> sqlx::Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM devices WHERE device_id = ?")
+        .bind(device_id.as_bytes().as_slice())
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(row.is_some())
+}
+
 /// Delete a device, its pending-delivery rows, and any envelopes that no longer have a
 /// recipient (otherwise the reaper only reaps envelopes whose recipient rows are all ACK'd,
 /// leaving orphans behind until TTL). Runs in a single transaction.

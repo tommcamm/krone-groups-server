@@ -102,6 +102,10 @@ async fn submit(
         }
 
         if outcome == InsertEnvelopeOutcome::Inserted {
+            if !queries::device_exists_with(&mut tx, &env.recipient_device_id).await? {
+                return Err(ApiError::BadRequest("unknown recipient_device_id".into()));
+            }
+
             let sent_last_hour =
                 queries::count_sent_in_window_with(&mut tx, &sender, now, 3600).await?;
             if sent_last_hour as u32 > policy.max_envelopes_per_device_per_hour {

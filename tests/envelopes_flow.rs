@@ -208,6 +208,31 @@ async fn sender_cannot_address_self() {
 }
 
 #[tokio::test]
+async fn submit_rejects_unknown_recipient_device() {
+    let harness = common::build_harness().await;
+    let alice = ClientIdentity::from_seed([0x56; 32]);
+    let bob = ClientIdentity::from_seed([0x57; 32]);
+    register(&harness, &alice).await;
+
+    let (_, env) = sample_envelope(&bob.device_id_hex());
+    let submit_body = json!({ "envelopes": [env] }).to_string();
+    let req = alice.sign_request(
+        "POST",
+        "/envelopes",
+        submit_body.as_bytes(),
+        ClientIdentity::now_ts(),
+    );
+    let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let (envelopes,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM envelopes")
+        .fetch_one(&harness.db)
+        .await
+        .expect("count envelopes");
+    assert_eq!(envelopes, 0, "unknown-recipient submit must roll back");
+}
+
+#[tokio::test]
 async fn inbox_pagination_honors_limit_and_cursor() {
     let harness = common::build_harness().await;
     let alice = ClientIdentity::from_seed([0x66; 32]);
