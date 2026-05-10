@@ -122,18 +122,22 @@ git submodule update --init
 
 Useful env variables:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `KRONE_BIND` | `0.0.0.0:8080` | Socket the server listens on. |
-| `KRONE_DATA_DIR` | `./data` | Directory holding `krone.sqlite` and `server-key`. |
-| `KRONE_DATABASE_URL` | `sqlite://$KRONE_DATA_DIR/krone.sqlite?mode=rwc` | Override for postgres, etc. (only sqlite supported for now) |
-| `KRONE_SERVER_SEED` | _(auto-generated on first boot)_ | 32-byte hex Ed25519 seed. |
-| `KRONE_TTL_SECONDS` | `2592000` (30 days) | How long an envelope lives before the reaper deletes it. |
-| `KRONE_MAX_ENVELOPE_BYTES` | `65536` | Per-envelope ciphertext cap. |
-| `KRONE_MAX_INBOX_PER_DEVICE` | `10000` | DoS-shield: per-recipient pending cap. |
-| `KRONE_MAX_ENVELOPES_PER_DEVICE_PER_HOUR` | `600` | Per-sender submission budget. |
-| `KRONE_CLOCK_SKEW_SECONDS` | `120` | Allowed client/server clock skew on signed requests. |
-| `RUST_LOG` | `info` | Standard tracing-subscriber filter. |
+| Variable | Default | Valid range | Meaning |
+|---|---:|---:|---|
+| `KRONE_BIND` | `0.0.0.0:8080` | valid socket address | Socket the server listens on. |
+| `KRONE_DATA_DIR` | `./data` | writable directory | Directory holding `krone.sqlite` and `server-key`. |
+| `KRONE_DATABASE_URL` | `sqlite://$KRONE_DATA_DIR/krone.sqlite?mode=rwc` | SQLite URL | Database URL. Only SQLite is supported for now. |
+| `KRONE_SERVER_SEED` | _(auto-generated on first boot)_ | 32-byte hex | Ed25519 seed used only when no persisted `server-key` exists. |
+| `KRONE_TTL_SECONDS` | `2592000` (30 days) | `60..=31536000` | How long an envelope lives before the reaper deletes it. |
+| `KRONE_MAX_ENVELOPE_BYTES` | `65536` | `1..=1048576` | Per-envelope ciphertext cap. |
+| `KRONE_MAX_INBOX_PER_DEVICE` | `10000` | `1..=1000000` | DoS-shield: per-recipient pending cap. |
+| `KRONE_MAX_ENVELOPES_PER_DEVICE_PER_HOUR` | `600` | `1..=100000` | Per-sender submission budget. |
+| `KRONE_CLOCK_SKEW_SECONDS` | `120` | `1..=3600` | Allowed client/server clock skew on signed requests. |
+| `RUST_LOG` | `info` | tracing filter | Standard tracing-subscriber filter. |
+
+Policy values are validated at startup. Invalid values fail fast rather than starting with a nonsensical retention, rate-limit, or clock-skew policy.
+
+The server identity is persisted at `$KRONE_DATA_DIR/server-key`. On Unix, new key files are created with `0600` permissions and startup fails if permissions cannot be tightened. If `KRONE_SERVER_SEED` is set after a key already exists, the on-disk key wins so users' pinned server fingerprint does not rotate accidentally.
 
 ## Protocol versioning
 
