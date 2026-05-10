@@ -1,6 +1,6 @@
 # krone-groups-server
 
-Zero-metadata, end-to-end-encrypted message relay for the Krone app's Groups feature. This is the **"mailman"**: it accepts signed envelopes, forwards them to their recipients, and deletes them as soon as everyone has ACK'd (or after TTL). The server cannot read content, does not know group structure, and keeps no access logs.
+Content-private, minimal-metadata message relay for the Krone app's Groups feature. This is the **"mailman"**: it accepts signed envelopes, forwards them to registered recipient devices, and deletes them as soon as everyone has ACK'd (or after TTL). The server cannot read message content or group data, and it avoids durable access logs by default.
 
 **License:** GPL-3.0-or-later. Matches the Krone Android client.
 
@@ -171,6 +171,12 @@ Do the same in the Krone Android repo so both sides land on the same contract ve
 - No access logs beyond aggregate counters.
 
 If your deployment adds reverse-proxy access logging, consider disabling it or stripping the `X-Forwarded-For` tail before persisting.
+
+## Privacy model
+
+The relay stores a small device registry: opaque device IDs, public signing keys, registration time, and last-seen time. It also temporarily stores routing metadata for pending envelopes: sender device ID, recipient device ID, envelope timing, size, and opaque recipient tags. That metadata is needed to verify signed requests, route inboxes, enforce abuse limits, and delete delivered messages.
+
+The relay does not store user accounts, names, emails, phone numbers, group IDs, group membership records, expense data, currencies, balances, or plaintext message content. Group structure and message meaning live inside end-to-end-encrypted payloads; recipient tags rotate so the server does not get an explicit group identifier.
 
 ## Endpoints (abridged)
 
