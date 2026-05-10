@@ -7,13 +7,19 @@ use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
 
 use crate::auth::{RawSignedRequest, SignedRequest};
-use crate::config::MAX_ENVELOPES_PER_BATCH;
+use crate::config::{MAX_ENVELOPES_PER_BATCH, MAX_SIGNED_RESPONSE_BYTES};
 use crate::db::queries::{self, InsertEnvelope, InsertEnvelopeOutcome};
 use crate::error::ApiError;
 use crate::protocol::envelope::{
     AckRequest, AckResponse, EnvelopeSubmitRequest, EnvelopeSubmitResponse, InboxResponse,
 };
 use crate::state::AppState;
+
+const DEFAULT_INBOX_LIMIT: u32 = 100;
+const MAX_REQUESTED_INBOX_LIMIT: u32 = 500;
+const INBOX_RESPONSE_SAFETY_MARGIN_BYTES: usize = 1024 * 1024;
+const INBOX_ENVELOPE_JSON_OVERHEAD_BYTES: usize = 1024;
+const ED25519_SIGNATURE_BYTES: usize = 64;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -63,23 +69,12 @@ async fn submit(
         }
     }
 
-    // All caps + inserts in one transaction so concurrent submits from the same sender
-    // can't race past the per-hour / per-inbox budgets.
+    // All inserts + post-insert cap checks run in one transaction. Exact duplicates do not
+    // consume quota, while newly inserted rows are rolled back if they cross a cap.
     let mut tx = state.db.begin().await?;
-
-    let sent_last_hour = queries::count_sent_in_window_with(&mut tx, &sender, now, 3600).await?;
-    if sent_last_hour as u32 + req.envelopes.len() as u32 > policy.max_envelopes_per_device_per_hour
-    {
-        return Err(ApiError::RateLimited);
-    }
 
     let mut accepted = Vec::with_capacity(req.envelopes.len());
     for env in &req.envelopes {
-        let pending = queries::count_pending_with(&mut tx, &env.recipient_device_id).await?;
-        if pending as u32 >= policy.max_inbox_per_device {
-            return Err(ApiError::RateLimited);
-        }
-
         // Idempotent on envelope_id: a replay with the same id is reported as accepted
         // but not re-inserted.
         let outcome = queries::insert_envelope_with(
@@ -104,6 +99,19 @@ async fn submit(
             return Err(ApiError::Conflict(
                 "envelope_id already exists with different content",
             ));
+        }
+
+        if outcome == InsertEnvelopeOutcome::Inserted {
+            let sent_last_hour =
+                queries::count_sent_in_window_with(&mut tx, &sender, now, 3600).await?;
+            if sent_last_hour as u32 > policy.max_envelopes_per_device_per_hour {
+                return Err(ApiError::RateLimited);
+            }
+
+            let pending = queries::count_pending_with(&mut tx, &env.recipient_device_id).await?;
+            if pending as u32 > policy.max_inbox_per_device {
+                return Err(ApiError::RateLimited);
+            }
         }
 
         accepted.push(env.envelope_id);
@@ -136,7 +144,11 @@ async fn inbox(
         return Err(ApiError::BadRequest("inbox expects empty body".into()));
     }
 
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let requested_limit = q
+        .limit
+        .unwrap_or(DEFAULT_INBOX_LIMIT)
+        .clamp(1, MAX_REQUESTED_INBOX_LIMIT);
+    let limit = effective_inbox_limit(state.cfg.policy.max_envelope_bytes, requested_limit);
     let page =
         queries::fetch_inbox(&state.db, &signed.device_id, q.since.as_deref(), limit).await?;
 
@@ -167,4 +179,50 @@ async fn ack(
     Ok(Json(AckResponse {
         acknowledged: acked,
     }))
+}
+
+fn effective_inbox_limit(max_envelope_bytes: u64, requested_limit: u32) -> u32 {
+    let response_budget = MAX_SIGNED_RESPONSE_BYTES
+        .saturating_sub(INBOX_RESPONSE_SAFETY_MARGIN_BYTES)
+        .max(1);
+    let per_envelope = b64_encoded_len(max_envelope_bytes as usize)
+        .saturating_add(b64_encoded_len(ED25519_SIGNATURE_BYTES))
+        .saturating_add(INBOX_ENVELOPE_JSON_OVERHEAD_BYTES)
+        .max(1);
+    let policy_limit = (response_budget / per_envelope).max(1) as u32;
+    requested_limit.min(policy_limit)
+}
+
+fn b64_encoded_len(bytes: usize) -> usize {
+    bytes.div_ceil(3).saturating_mul(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::MAX_ENVELOPE_BYTES_LIMIT;
+
+    #[test]
+    fn inbox_limit_keeps_worst_case_page_under_signed_response_cap() {
+        let limit = effective_inbox_limit(MAX_ENVELOPE_BYTES_LIMIT, MAX_REQUESTED_INBOX_LIMIT);
+        assert!(limit < MAX_REQUESTED_INBOX_LIMIT);
+
+        let worst_case_bytes = limit as usize
+            * (b64_encoded_len(MAX_ENVELOPE_BYTES_LIMIT as usize)
+                + b64_encoded_len(ED25519_SIGNATURE_BYTES)
+                + INBOX_ENVELOPE_JSON_OVERHEAD_BYTES);
+        assert!(
+            worst_case_bytes
+                <= MAX_SIGNED_RESPONSE_BYTES.saturating_sub(INBOX_RESPONSE_SAFETY_MARGIN_BYTES)
+        );
+    }
+
+    #[test]
+    fn inbox_limit_preserves_small_requested_limits() {
+        assert_eq!(
+            effective_inbox_limit(MAX_ENVELOPE_BYTES_LIMIT, 2),
+            2,
+            "small explicit pages should not be forced down"
+        );
+    }
 }

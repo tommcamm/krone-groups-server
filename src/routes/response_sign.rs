@@ -11,6 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use ulid::Ulid;
 
+use crate::config::MAX_SIGNED_RESPONSE_BYTES;
 use crate::crypto::response_signing_input;
 use crate::state::AppState;
 
@@ -37,8 +38,8 @@ pub async fn sign_responses(
     let res = next.run(req).await;
     let (mut parts, body) = res.into_parts();
 
-    // Buffer the body so we can hash it. 16 MiB cap is far above anything we return.
-    let bytes = match to_bytes(body, 16 * 1024 * 1024).await {
+    // Buffer the body so we can hash it. Inbox pagination is sized to stay under this cap.
+    let bytes = match to_bytes(body, MAX_SIGNED_RESPONSE_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "response body exceeded buffer cap");

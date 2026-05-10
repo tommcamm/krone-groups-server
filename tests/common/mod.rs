@@ -32,6 +32,11 @@ pub async fn test_app() -> Router {
 
 #[allow(dead_code)]
 pub async fn build_harness() -> TestHarness {
+    build_harness_with_policy(Policy::default()).await
+}
+
+#[allow(dead_code)]
+pub async fn build_harness_with_policy(policy: Policy) -> TestHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_dir = tmp.path().to_path_buf();
     let database_url = format!("sqlite://{}/krone.sqlite?mode=rwc", data_dir.display());
@@ -40,7 +45,7 @@ pub async fn build_harness() -> TestHarness {
         bind_addr: "127.0.0.1:0".parse().expect("parse bind"),
         data_dir,
         database_url,
-        policy: Policy::default(),
+        policy,
         server_seed_hex: Some(TEST_SERVER_SEED_HEX.to_string()),
         server_version: "test".to_string(),
     };

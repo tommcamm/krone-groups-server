@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 /// cap in `auth::signed_request::max_body_bytes` and the batch rejection in
 /// `routes::envelopes::submit`.
 pub const MAX_ENVELOPES_PER_BATCH: usize = 256;
+pub const MAX_SIGNED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MIN_TTL_SECONDS: u64 = 60;
 pub const MAX_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub const MIN_ENVELOPE_BYTES_LIMIT: u64 = 1;

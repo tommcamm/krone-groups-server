@@ -10,6 +10,7 @@ use ulid::Ulid;
 mod common;
 
 use common::signing::ClientIdentity;
+use krone_groups_server::config::{MAX_ENVELOPE_BYTES_LIMIT, MAX_SIGNED_RESPONSE_BYTES, Policy};
 
 async fn register(harness: &common::TestHarness, id: &ClientIdentity) {
     let body = json!({
@@ -33,18 +34,26 @@ fn base64_std(bytes: &[u8]) -> String {
 }
 
 fn sample_envelope(recipient_hex: &str) -> (Ulid, serde_json::Value) {
+    sample_envelope_with_ciphertext(recipient_hex, 64, 0x11)
+}
+
+fn sample_envelope_with_ciphertext(
+    recipient_hex: &str,
+    ciphertext_len: usize,
+    marker: u8,
+) -> (Ulid, serde_json::Value) {
     let envelope_id = Ulid::new();
-    let ciphertext = vec![0xAB; 64];
+    let ciphertext = vec![0xAB; ciphertext_len];
     let content_signature = vec![0xCD; 64]; // arbitrary; server doesn't verify content sig
-    let nonce = vec![0xEF; 24];
-    let recipient_tag = vec![0x11; 32];
+    let nonce = vec![marker; 24];
+    let recipient_tag = vec![marker; 32];
 
     let v = json!({
         "envelope_id": envelope_id.to_string(),
         "recipient_device_id": recipient_hex,
         "recipient_tag": hex::encode(recipient_tag),
         "epoch": 1,
-        "seq": 7,
+        "seq": marker as u64,
         "nonce": hex::encode(nonce),
         "ciphertext": base64_std(&ciphertext),
         "content_signature": base64_std(&content_signature),
@@ -244,6 +253,51 @@ async fn inbox_pagination_honors_limit_and_cursor() {
     let inbox: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     let envs = inbox["envelopes"].as_array().expect("envelopes array");
     assert_eq!(envs.len(), 2);
+}
+
+#[tokio::test]
+async fn inbox_large_pages_stay_below_signed_response_cap() {
+    let harness = common::build_harness_with_policy(Policy {
+        max_envelope_bytes: MAX_ENVELOPE_BYTES_LIMIT,
+        max_envelopes_per_device_per_hour: 100,
+        ..Policy::default()
+    })
+    .await;
+    let alice = ClientIdentity::from_seed([0x78; 32]);
+    let bob = ClientIdentity::from_seed([0x79; 32]);
+    register(&harness, &alice).await;
+    register(&harness, &bob).await;
+
+    let base = ClientIdentity::now_ts() + 20;
+    for i in 0..12u8 {
+        let (_id, env) = sample_envelope_with_ciphertext(
+            &bob.device_id_hex(),
+            MAX_ENVELOPE_BYTES_LIMIT as usize,
+            i + 1,
+        );
+        let body = json!({ "envelopes": [env] }).to_string();
+        let req = alice.sign_request("POST", "/envelopes", body.as_bytes(), base + i as i64);
+        let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    let req = bob.sign_request("GET", "/envelopes/inbox?limit=500", b"", base + 100);
+    let res = harness.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    assert!(
+        bytes.len() < MAX_SIGNED_RESPONSE_BYTES,
+        "signed response body exceeded cap: {}",
+        bytes.len()
+    );
+
+    let inbox: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let envs = inbox["envelopes"].as_array().expect("envelopes array");
+    assert!(
+        envs.len() < 12,
+        "worst-case page should be capped below the requested 500 envelopes"
+    );
+    assert!(inbox["next_cursor"].is_string());
 }
 
 fn urlencoded(s: &str) -> String {
